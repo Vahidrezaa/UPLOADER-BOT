@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 import asyncpg
 from dotenv import load_dotenv
+from aiohttp import web
 
 # تنظیمات محیطی
 load_dotenv()
@@ -591,11 +592,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 # ========================
+# === WEB SERVER SETUP ===
+# ========================
+
+async def health_check(request):
+    """صفحه سلامت برای بررسی وضعیت ربات"""
+    return web.Response(text="🤖 Telegram Bot is Running!")
+async def run_web_server():
+    """اجرای سرور وب ساده"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
+    await site.start()
+    logger.info("Web server started at port 10000")
+    
+    # اجرای نامحدود
+    while True:
+        await asyncio.sleep(3600)
+
+# ========================
 # ==== BOT SETUP =========
 # ========================
 
-async def init_bot():
-    """راه‌اندازی اولیه ربات"""
+async def run_telegram_bot():
+    """اجرای اصلی ربات تلگرام"""
     await bot_manager.init()
     application = Application.builder().token(BOT_TOKEN).build()
     
@@ -638,10 +660,30 @@ async def init_bot():
     application.add_handler(CallbackQueryHandler(button_handler))
     
     # اجرای ربات
-    logger.info("Starting bot...")
-    await application.initialize()  # مقداردهی اولیه
-    await application.start()  # شروع ربات
+    logger.info("Starting Telegram bot...")
+    await application.initialize()
+    await application.start()
     await application.updater.start_polling()
+    
+    # نگه داشتن ربات در حالت اجرا
+    while True:
+        await asyncio.sleep(3600)
+async def main():
+    """اجرای همزمان سرور وب و ربات تلگرام"""
+    await asyncio.gather(
+        run_web_server(),
+        run_telegram_bot()
+    )
 
 if __name__ == '__main__':
-    asyncio.run(init_bot())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.exception(f"Critical error: {e}")
+    finally:
+        loop.close()
