@@ -491,7 +491,7 @@ async def handle_channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """حذف کانال"""
-    if not bot_manager.is_admin(update.effective_user.id)):
+    if not bot_manager.is_admin(update.effective_user.id):
         await update.message.reply_text("❌ دسترسی ممنوع!")
         return
     
