@@ -296,7 +296,7 @@ async def admin_category_menu(update: Update, category_id: str):
     
     await update.message.reply_text(
         f"📂 دسته: {category['name']}\n"
-        f"📦 تعداد فایل‌ها: {len(category['files']}\n\n"
+        f"📦 تعداد فایل‌ها: {len(category['files'])}\n\n"
         "لطفا عملیات مورد نظر را انتخاب کنید:",
         reply_markup=InlineKeyboardMarkup(keyboard))
 
