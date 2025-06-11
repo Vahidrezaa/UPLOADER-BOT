@@ -639,7 +639,9 @@ async def init_bot():
     
     # اجرای ربات
     logger.info("Starting bot...")
-    await application.run_polling()
+    await application.initialize()  # مقداردهی اولیه
+    await application.start()  # شروع ربات
+    await application.updater.start_polling()
 
 if __name__ == '__main__':
     asyncio.run(init_bot())
