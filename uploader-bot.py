@@ -2,7 +2,7 @@ import os
 import logging
 import uuid
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -104,13 +104,16 @@ class Database:
             category = await conn.fetchrow(
                 "SELECT name, created_by FROM categories WHERE id = $1", category_id
             )
+            if not category:
+                return None
+                
             files = await conn.fetch(
                 "SELECT file_id, file_type, caption FROM files WHERE category_id = $1", category_id
             )
             return {
                 'name': category['name'],
                 'files': [dict(file) for file in files]
-            } if category else None
+            }
 
     # --- مدیریت فایل‌ها ---
     async def add_file(self, category_id: str, file_info: dict) -> bool:
@@ -179,9 +182,11 @@ class BotManager:
         self.db = Database()
         self.pending_uploads = {}  # {user_id: {'category_id': str, 'files': list}}
         self.pending_channels = {}  # {user_id: {'channel_id': str, 'name': str, 'link': str}}
+        self.bot_username = None
     
-    async def init(self):
+    async def init(self, bot_username: str):
         """راه‌اندازی اولیه"""
+        self.bot_username = bot_username
         await self.db.connect()
     
     def is_admin(self, user_id: int) -> bool:
@@ -189,8 +194,12 @@ class BotManager:
         return user_id in ADMIN_IDS
     
     def generate_link(self, category_id: str) -> str:
-        """تولید لینک دسته"""
-        return f"https://t.me/{BOT_TOKEN.split(':')[0]}?start=cat_{category_id}"
+        """تولید لینک دسته با یوزرنیم صحیح"""
+        if self.bot_username:
+            return f"https://t.me/{self.bot_username}?start=cat_{category_id}"
+        # Fallback در صورت عدم وجود یوزرنیم
+        bot_id = BOT_TOKEN.split(':')[0]
+        return f"https://t.me/{bot_id}?start=cat_{category_id}"
     
     def extract_file_info(self, update: Update) -> dict:
         """استخراج اطلاعات فایل"""
@@ -240,95 +249,132 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("👋 سلام! برای دریافت فایل‌ها از لینک‌ها استفاده کنید.")
 
+async def is_user_member(context, channel_id, user_id):
+    """بررسی عضویت کاربر با تلاش مجدد"""
+    for _ in range(3):  # 3 بار تلاش
+        try:
+            member = await context.bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+            if member.status in ['member', 'administrator', 'creator']:
+                return True
+        except Exception as e:
+            logger.warning(f"خطا در بررسی عضویت: {e}")
+        
+        await asyncio.sleep(2)  # تاخیر 2 ثانیه‌ای بین هر تلاش
+    
+    return False
+
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: str):
     """مدیریت دسترسی به دسته"""
-    user_id = update.effective_user.id
-    
+    # استخراج user_id و message بسته به نوع update
+    if update.message:
+        user_id = update.message.from_user.id
+        message = update.message
+    elif update.callback_query:
+        user_id = update.callback_query.from_user.id
+        message = update.callback_query.message
+    else:
+        logger.error("Unsupported update type")
+        return
+
     # بررسی ادمین
     if bot_manager.is_admin(user_id):
-        await admin_category_menu(update, category_id)
+        await admin_category_menu(message, category_id)
         return
     
     # بررسی عضویت در کانال‌ها
     channels = await bot_manager.db.get_channels()
     if not channels:
-        await send_category_files(update, context, category_id)
+        await send_category_files(message, context, category_id)
         return
     
     non_joined = []
     for channel in channels:
-        try:
-            member = await context.bot.get_chat_member(
-                channel['channel_id'], user_id
-            )
-            if member.status not in ['member', 'administrator', 'creator']:
-                non_joined.append(channel)
-        except Exception:
+        is_member = await is_user_member(context, channel['channel_id'], user_id)
+        if not is_member:
             non_joined.append(channel)
     
     if not non_joined:
-        await send_category_files(update, context, category_id)
+        await send_category_files(message, context, category_id)
         return
     
     # ایجاد صفحه عضویت
-    keyboard = [
-        [InlineKeyboardButton(f"📢 {ch['channel_name']}", url=ch['invite_link'])]
-        for ch in non_joined
-    ]
-    keyboard.append([InlineKeyboardButton("✅ عضو شدم", callback_data=f"check_{category_id}")])
+    keyboard = []
+    for channel in non_joined:
+        button = InlineKeyboardButton(
+            text=f"📢 {channel['channel_name']}",
+            url=channel['invite_link']
+        )
+        keyboard.append([button])
     
-    await update.message.reply_text(
+    keyboard.append([
+        InlineKeyboardButton(
+            "✅ عضو شدم", 
+            callback_data=f"check_{category_id}"
+        )
+    ])
+    
+    await message.reply_text(
         "⚠️ برای دسترسی ابتدا در کانال‌های زیر عضو شوید:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def admin_category_menu(update: Update, category_id: str):
+async def admin_category_menu(message: Message, category_id: str):
     """منوی مدیریت دسته برای ادمین"""
-    category = await bot_manager.db.get_category(category_id)
-    if not category:
-        await update.message.reply_text("❌ دسته یافت نشد!")
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("📁 مشاهده فایل‌ها", callback_data=f"view_{category_id}")],
-        [InlineKeyboardButton("➕ افزودن فایل", callback_data=f"add_{category_id}")],
-        [InlineKeyboardButton("🗑 حذف دسته", callback_data=f"delcat_{category_id}")]
-    ]
-    
-    await update.message.reply_text(
-        f"📂 دسته: {category['name']}\n"
-        f"📦 تعداد فایل‌ها: {len(category['files'])}\n\n"
-        "لطفا عملیات مورد نظر را انتخاب کنید:",
-        reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        category = await bot_manager.db.get_category(category_id)
+        if not category:
+            await message.reply_text("❌ دسته یافت نشد!")
+            return
+        
+        keyboard = [
+            [InlineKeyboardButton("📁 مشاهده فایل‌ها", callback_data=f"view_{category_id}")],
+            [InlineKeyboardButton("➕ افزودن فایل", callback_data=f"add_{category_id}")],
+            [InlineKeyboardButton("🗑 حذف دسته", callback_data=f"delcat_{category_id}")]
+        ]
+        
+        await message.reply_text(
+            f"📂 دسته: {category['name']}\n"
+            f"📦 تعداد فایل‌ها: {len(category['files'])}\n\n"
+            "لطفا عملیات مورد نظر را انتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.error(f"خطا در منوی ادمین: {e}")
+        await message.reply_text("❌ خطایی در نمایش منو رخ داد")
 
-async def send_category_files(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: str):
+async def send_category_files(message: Message, context: ContextTypes.DEFAULT_TYPE, category_id: str):
     """ارسال فایل‌های یک دسته"""
-    category = await bot_manager.db.get_category(category_id)
-    if not category or not category['files']:
-        await update.message.reply_text("❌ فایلی برای نمایش وجود ندارد!")
-        return
-    
-    await update.message.reply_text(f"📤 ارسال فایل‌های '{category['name']}'...")
-    chat_id = update.effective_chat.id
-    
-    for file in category['files']:
-        try:
-            send_func = {
-                'document': context.bot.send_document,
-                'photo': context.bot.send_photo,
-                'video': context.bot.send_video,
-                'audio': context.bot.send_audio
-            }.get(file['file_type'])
-            
-            if send_func:
-                await send_func(
-                    chat_id=chat_id,
-                    **{file['file_type']: file['file_id']},
-                    caption=file.get('caption', '')[:1024]
-                )
-            await asyncio.sleep(0.3)
-        except Exception as e:
-            logger.error(f"ارسال فایل خطا: {e}")
+    try:
+        chat_id = message.chat_id
+        
+        category = await bot_manager.db.get_category(category_id)
+        if not category or not category['files']:
+            await message.reply_text("❌ فایلی برای نمایش وجود ندارد!")
+            return
+        
+        await message.reply_text(f"📤 ارسال فایل‌های '{category['name']}'...")
+        
+        for file in category['files']:
+            try:
+                send_func = {
+                    'document': context.bot.send_document,
+                    'photo': context.bot.send_photo,
+                    'video': context.bot.send_video,
+                    'audio': context.bot.send_audio
+                }.get(file['file_type'])
+                
+                if send_func:
+                    await send_func(
+                        chat_id=chat_id,
+                        **{file['file_type']: file['file_id']},
+                        caption=file.get('caption', '')[:1024]
+                    )
+                await asyncio.sleep(0.5)  # افزایش تاخیر برای جلوگیری از محدودیت
+            except Exception as e:
+                logger.error(f"ارسال فایل خطا: {e}")
+                await asyncio.sleep(2)
+    except Exception as e:
+        logger.error(f"خطا در ارسال فایل‌ها: {e}")
+        await message.reply_text("❌ خطایی در ارسال فایل‌ها رخ داد")
 
 # ========================
 # ==== ADMIN COMMANDS ====
@@ -509,6 +555,155 @@ async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not bot_manager.is_admin(update.effective_user.id):
         await update.message.reply_text("❌ دسترسی ممنوع!")
         return
+
+    if not context.args:
+        await update.message.reply_text("لطفا آیدی دسته را مشخص کنید.\nمثال: /upload CAT_ID")
+        return
+    
+    category_id = context.args[0]
+    category = await bot_manager.db.get_category(category_id)
+    if not category:
+        await update.message.reply_text("❌ دسته یافت نشد!")
+        return
+    
+    bot_manager.pending_uploads[user_id] = {
+        'category_id': category_id,
+        'files': []
+    }
+    
+    await update.message.reply_text(
+        f"📤 حالت آپلود فعال شد! فایل‌ها را ارسال کنید.\n"
+        f"برای پایان: /finish_upload\n"
+        f"برای لغو: /cancel")
+    return UPLOADING
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش فایل‌های ارسالی"""
+    user_id = update.effective_user.id
+    if user_id not in bot_manager.pending_uploads:
+        return
+    
+    file_info = bot_manager.extract_file_info(update)
+    if not file_info:
+        await update.message.reply_text("❌ نوع فایل پشتیبانی نمی‌شود!")
+        return
+    
+    upload = bot_manager.pending_uploads[user_id]
+    upload['files'].append(file_info)
+    
+    await update.message.reply_text(f"✅ فایل دریافت شد! (تعداد: {len(upload['files'])})")
+
+async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پایان آپلود فایل‌ها"""
+    user_id = update.effective_user.id
+    if user_id not in bot_manager.pending_uploads:
+        await update.message.reply_text("❌ هیچ آپلودی فعال نیست!")
+        return ConversationHandler.END
+    
+    upload = bot_manager.pending_uploads.pop(user_id)
+    if not upload['files']:
+        await update.message.reply_text("❌ فایلی دریافت نشد!")
+        return ConversationHandler.END
+    
+    count = await bot_manager.db.add_files(upload['category_id'], upload['files'])
+    link = bot_manager.generate_link(upload['category_id'])
+    
+    await update.message.reply_text(
+        f"✅ {count} فایل با موفقیت ذخیره شد!\n\n"
+        f"🔗 لینک دسته:\n{link}")
+    return ConversationHandler.END
+
+async def categories_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش لیست دسته‌ها"""
+    if not bot_manager.is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ دسترسی ممنوع!")
+        return
+    
+    categories = await bot_manager.db.get_categories()
+    if not categories:
+        await update.message.reply_text("📂 هیچ دسته‌ای وجود ندارد!")
+        return
+    
+    message = "📁 لیست دسته‌ها:\n\n"
+    for cid, name in categories.items():
+        message += f"• {name} [ID: {cid}]\n"
+        message += f"  لینک: {bot_manager.generate_link(cid)}\n\n"
+    
+    await update.message.reply_text(message)
+
+# ========================
+# === CHANNEL MANAGEMENT ==
+# ========================
+
+async def add_channel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع افزودن کانال"""
+    if not bot_manager.is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ دسترسی ممنوع!")
+        return
+    
+    bot_manager.pending_channels[update.effective_user.id] = {}
+    await update.message.reply_text(
+        "لطفا اطلاعات کانال را به ترتیب ارسال کنید:\n\n"
+        "1. آیدی کانال (مثال: -1001234567890)\n"
+        "2. نام کانال\n"
+        "3. لینک دعوت")
+    return WAITING_CHANNEL_INFO
+
+async def handle_channel_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """پردازش اطلاعات کانال"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if user_id not in bot_manager.pending_channels:
+        return ConversationHandler.END
+    
+    chan_data = bot_manager.pending_channels[user_id]
+    
+    if 'channel_id' not in chan_data:
+        chan_data['channel_id'] = text
+        await update.message.reply_text("✅ آیدی دریافت شد! لطفا نام کانال را ارسال کنید:")
+        return WAITING_CHANNEL_INFO
+    
+    if 'name' not in chan_data:
+        chan_data['name'] = text
+        await update.message.reply_text("✅ نام دریافت شد! لطفا لینک دعوت را ارسال کنید:")
+        return WAITING_CHANNEL_INFO
+    
+    chan_data['link'] = text
+    success = await bot_manager.db.add_channel(
+        chan_data['channel_id'], 
+        chan_data['name'], 
+        chan_data['link']
+    )
+    
+    del bot_manager.pending_channels[user_id]
+    
+    if success:
+        await update.message.reply_text("✅ کانال با موفقیت افزوده شد!")
+    else:
+        await update.message.reply_text("❌ خطا در افزودن کانال (احتمالا تکراری است)")
+    
+    return ConversationHandler.END
+
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف کانال"""
+    if not bot_manager.is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ دسترسی ممنوع!")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("لطفا آیدی کانال را مشخص کنید.\nمثال: /remove_channel -1001234567890")
+        return
+    
+    success = await bot_manager.db.delete_channel(context.args[0])
+    await update.message.reply_text(
+        "✅ کانال حذف شد!" if success else "❌ کانال یافت نشد!")
+
+async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """نمایش لیست کانال‌ها"""
+    if not bot_manager.is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ دسترسی ممنوع!")
+        return
     
     channels = await bot_manager.db.get_channels()
     if not channels:
@@ -538,7 +733,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # بررسی عضویت در کانال‌ها
     if data.startswith('check_'):
         category_id = data[6:]
-        await handle_category(query, context, category_id)
+        user_id = query.from_user.id
+        
+        # بررسی مجدد عضویت
+        channels = await bot_manager.db.get_channels()
+        non_joined = []
+        for channel in channels:
+            is_member = await is_user_member(context, channel['channel_id'], user_id)
+            if not is_member:
+                non_joined.append(channel)
+        
+        if non_joined:
+            # هنوز در برخی کانال‌ها عضو نیست
+            keyboard = []
+            for channel in non_joined:
+                button = InlineKeyboardButton(
+                    text=f"📢 {channel['channel_name']}",
+                    url=channel['invite_link']
+                )
+                keyboard.append([button])
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    "✅ عضو شدم", 
+                    callback_data=f"check_{category_id}"
+                )
+            ])
+            
+            await query.edit_message_text(
+                "⚠️ هنوز در کانال‌های زیر عضو نشده‌اید:",
+                reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            # حالا عضو شده است
+            await query.edit_message_text("✅ عضویت شما تأیید شد! لطفا دوباره روی لینک دسته کلیک کنید.")
         return
     
     # دستورات ادمین
@@ -549,7 +776,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith('view_'):
         category_id = data[5:]
-        await send_category_files(query, context, category_id)
+        await send_category_files(query.message, context, category_id)
     
     elif data.startswith('add_'):
         category_id = data[4:]
@@ -569,8 +796,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ دسته یافت نشد!")
             return
         
-        # در این نسخه ساده‌سازی شده، حذف مستقیم انجام می‌شود
-        # برای نسخه پیشرفته‌تر می‌توان از تایید استفاده کرد
+        # حذف دسته
         async with bot_manager.db.pool.acquire() as conn:
             await conn.execute("DELETE FROM categories WHERE id = $1", category_id)
         
@@ -598,6 +824,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def health_check(request):
     """صفحه سلامت برای بررسی وضعیت ربات"""
     return web.Response(text="🤖 Telegram Bot is Running!")
+
 async def run_web_server():
     """اجرای سرور وب ساده"""
     app = web.Application()
@@ -618,8 +845,14 @@ async def run_web_server():
 
 async def run_telegram_bot():
     """اجرای اصلی ربات تلگرام"""
-    await bot_manager.init()
     application = Application.builder().token(BOT_TOKEN).build()
+    
+    # دریافت یوزرنیم ربات
+    await application.initialize()
+    bot = await application.bot.get_me()
+    bot_username = bot.username
+    logger.info(f"Bot username: @{bot_username}")
+    await bot_manager.init(bot_username)
     
     # دستورات اصلی
     application.add_handler(CommandHandler("start", start))
@@ -661,13 +894,13 @@ async def run_telegram_bot():
     
     # اجرای ربات
     logger.info("Starting Telegram bot...")
-    await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
     # نگه داشتن ربات در حالت اجرا
     while True:
         await asyncio.sleep(3600)
+
 async def main():
     """اجرای همزمان سرور وب و ربات تلگرام"""
     await asyncio.gather(
