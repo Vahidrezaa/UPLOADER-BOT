@@ -1,5 +1,5 @@
-# requirements.txt
 python-telegram-bot[job-queue]==20.3
 asyncpg
 python-dotenv
 uuid
+aiohttp==3.9.3
