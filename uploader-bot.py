@@ -271,7 +271,7 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE, ca
     
     # ایجاد صفحه عضویت
     keyboard = [
-        [InlineKeyboardButton(f"📢 {ch['channel_name']", url=ch['invite_link'])]
+        [InlineKeyboardButton(f"📢 {ch['channel_name']}", url=ch['invite_link'])]
         for ch in non_joined
     ]
     keyboard.append([InlineKeyboardButton("✅ عضو شدم", callback_data=f"check_{category_id}")])
@@ -505,7 +505,7 @@ async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """نمایش لیست کانال‌ها"""
-    if not bot_manager.is_admin(update.effective_user.id)):
+    if not bot_manager.is_admin(update.effective_user.id):
         await update.message.reply_text("❌ دسترسی ممنوع!")
         return
     
