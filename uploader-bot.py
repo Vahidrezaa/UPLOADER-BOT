@@ -135,25 +135,24 @@ class Database:
                 return False
     
     async def add_files(self, category_id: str, files: list) -> int:
-    """افزودن چندین فایل و شمارش دقیق ذخیره‌شده‌ها"""
-    async with self.pool.acquire() as conn:
-        inserted_count = 0
-        for f in files:
-            try:
-                await conn.execute(
-                    "INSERT INTO files(category_id, file_id, file_name, file_size, file_type, caption) "
-                    "VALUES($1, $2, $3, $4, $5, $6)",
-                    category_id,
-                    f['file_id'],
-                    f['file_name'],
-                    f['file_size'],
-                    f['file_type'],
-                    f.get('caption', '')
-                )
-                inserted_count += 1
-            except asyncpg.UniqueViolationError:
-                continue
-        return inserted_count
+        async with self.pool.acquire() as conn:
+            inserted_count = 0
+            for f in files:
+                try:
+                    await conn.execute(
+                        "INSERT INTO files(category_id, file_id, file_name, file_size, file_type, caption) "
+                        "VALUES($1, $2, $3, $4, $5, $6)",
+                        category_id,
+                        f['file_id'],
+                        f['file_name'],
+                        f['file_size'],
+                        f['file_type'],
+                        f.get('caption', '')
+                    )
+                    inserted_count += 1
+                except asyncpg.UniqueViolationError:
+                    continue
+            return inserted_count
 
     # --- مدیریت کانال‌ها ---
     async def add_channel(self, channel_id: str, name: str, link: str) -> bool:
@@ -851,7 +850,7 @@ async def keep_alive():
     while True:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get("http://localhost:10000/health") as resp:
+                async with session.get("https://uploader-bot-ely6.onrender.com") as resp:
                     if resp.status == 200:
                         logger.info("✅ Keep-alive ping sent successfully")
                     else:
