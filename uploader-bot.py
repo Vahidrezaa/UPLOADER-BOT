@@ -786,7 +786,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # حالا عضو شده است
             await query.edit_message_text("✅ عضویت شما تأیید شد! در حال آماده‌سازی فایل‌ها...")
             await send_category_files(query.message, context, category_id)
-                return
+        return
     
     # دستورات ادمین
     user_id = query.from_user.id
