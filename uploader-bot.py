@@ -206,36 +206,35 @@ class BotManager:
         bot_id = BOT_TOKEN.split(':')[0]
         return f"https://t.me/{bot_id}?start=cat_{category_id}"
     
-def extract_file_info(self, update: Update) -> dict:
-    """استخراج اطلاعات فایل"""
-    msg = update.message
+    def extract_file_info(self, update: Update) -> dict:
+        msg = update.message
 
-    if msg.document:
-        file = msg.document
-        file_type = 'document'
-        file_name = file.file_name or f"document_{file.file_id[:8]}"
-    elif msg.photo:
-        file = msg.photo[-1]  # بالاترین کیفیت
-        file_type = 'photo'
-        file_name = f"photo_{file.file_id[:8]}.jpg"
-    elif msg.video:
-        file = msg.video
-        file_type = 'video'
-        file_name = f"video_{file.file_id[:8]}.mp4"
-    elif msg.audio:
-        file = msg.audio
-        file_type = 'audio'
-        file_name = f"audio_{file.file_id[:8]}.mp3"
-    else:
-        return None
+        if msg.document:
+            file = msg.document
+            file_type = 'document'
+            file_name = file.file_name or f"document_{file.file_id[:8]}"
+        elif msg.photo:
+            file = msg.photo[-1]  # بالاترین کیفیت
+            file_type = 'photo'
+            file_name = f"photo_{file.file_id[:8]}.jpg"
+        elif msg.video:
+            file = msg.video
+            file_type = 'video'
+            file_name = f"video_{file.file_id[:8]}.mp4"
+        elif msg.audio:
+            file = msg.audio
+            file_type = 'audio'
+            file_name = f"audio_{file.file_id[:8]}.mp3"
+        else:
+            return None
 
-    return {
-        'file_id': file.file_id,
-        'file_name': file_name,
-        'file_size': file.file_size,
-        'file_type': file_type,
-        'caption': msg.caption or ''
-    }
+        return {
+            'file_id': file.file_id,
+            'file_name': file_name,
+            'file_size': file.file_size,
+            'file_type': file_type,
+            'caption': msg.caption or ''
+        }
 
 # ایجاد نمونه
 bot_manager = BotManager()
