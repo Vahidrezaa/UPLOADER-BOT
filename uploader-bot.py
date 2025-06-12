@@ -15,7 +15,7 @@ from telegram.ext import (
 import asyncpg
 from dotenv import load_dotenv
 from aiohttp import web
-
+import aiohttp
 # تنظیمات محیطی
 load_dotenv()
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -135,19 +135,25 @@ class Database:
                 return False
     
     async def add_files(self, category_id: str, files: list) -> int:
-        """افزودن چندین فایل به صورت گروهی"""
-        async with self.pool.acquire() as conn:
-            records = [
-                (category_id, f['file_id'], f['file_name'], 
-                 f['file_size'], f['file_type'], f.get('caption', ''))
-                for f in files
-            ]
-            await conn.executemany(
-                "INSERT INTO files(category_id, file_id, file_name, file_size, file_type, caption) "
-                "VALUES($1, $2, $3, $4, $5, $6) ON CONFLICT (file_id) DO NOTHING",
-                records
-            )
-            return len(files)
+    """افزودن چندین فایل و شمارش دقیق ذخیره‌شده‌ها"""
+    async with self.pool.acquire() as conn:
+        inserted_count = 0
+        for f in files:
+            try:
+                await conn.execute(
+                    "INSERT INTO files(category_id, file_id, file_name, file_size, file_type, caption) "
+                    "VALUES($1, $2, $3, $4, $5, $6)",
+                    category_id,
+                    f['file_id'],
+                    f['file_name'],
+                    f['file_size'],
+                    f['file_type'],
+                    f.get('caption', '')
+                )
+                inserted_count += 1
+            except asyncpg.UniqueViolationError:
+                continue
+        return inserted_count
 
     # --- مدیریت کانال‌ها ---
     async def add_channel(self, channel_id: str, name: str, link: str) -> bool:
@@ -201,21 +207,36 @@ class BotManager:
         bot_id = BOT_TOKEN.split(':')[0]
         return f"https://t.me/{bot_id}?start=cat_{category_id}"
     
-    def extract_file_info(self, update: Update) -> dict:
-        """استخراج اطلاعات فایل"""
-        msg = update.message
-        file = msg.document or msg.photo[-1] if msg.photo else msg.video or msg.audio
-        
-        if not file:
-            return None
-        
-        return {
-            'file_id': file.file_id,
-            'file_name': getattr(file, 'file_name', 'file'),
-            'file_size': file.file_size,
-            'file_type': 'document' if msg.document else 'photo' if msg.photo else 'video' if msg.video else 'audio',
-            'caption': msg.caption or ''
-        }
+def extract_file_info(self, update: Update) -> dict:
+    """استخراج اطلاعات فایل"""
+    msg = update.message
+
+    if msg.document:
+        file = msg.document
+        file_type = 'document'
+        file_name = file.file_name or f"document_{file.file_id[:8]}"
+    elif msg.photo:
+        file = msg.photo[-1]  # بالاترین کیفیت
+        file_type = 'photo'
+        file_name = f"photo_{file.file_id[:8]}.jpg"
+    elif msg.video:
+        file = msg.video
+        file_type = 'video'
+        file_name = f"video_{file.file_id[:8]}.mp4"
+    elif msg.audio:
+        file = msg.audio
+        file_type = 'audio'
+        file_name = f"audio_{file.file_id[:8]}.mp3"
+    else:
+        return None
+
+    return {
+        'file_id': file.file_id,
+        'file_name': file_name,
+        'file_size': file.file_size,
+        'file_type': file_type,
+        'caption': msg.caption or ''
+    }
 
 # ایجاد نمونه
 bot_manager = BotManager()
@@ -765,8 +786,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             # حالا عضو شده است
-            await query.edit_message_text("✅ عضویت شما تأیید شد! در حال آماده‌سازی فایل‌ها...")
-            await send_category_files(query.message, context, category_id)
+            await query.edit_message_text("✅ عضویت شما تأیید شد! لطفا دوباره روی لینک دسته کلیک کنید.")
         return
     
     # دستورات ادمین
@@ -826,6 +846,22 @@ async def health_check(request):
     """صفحه سلامت برای بررسی وضعیت ربات"""
     return web.Response(text="🤖 Telegram Bot is Running!")
 
+async def keep_alive():
+    """ارسال درخواست به health endpoint هر 5 دقیقه"""
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://localhost:10000/health") as resp:
+                    if resp.status == 200:
+                        logger.info("✅ Keep-alive ping sent successfully")
+                    else:
+                        logger.warning(f"⚠️ Keep-alive failed: {resp.status}")
+        except Exception as e:
+            logger.warning(f"⚠️ Keep-alive exception: {e}")
+        
+        await asyncio.sleep(450)  # هر ۵ دقیقه (۳۰۰ ثانیه)
+
+
 async def run_web_server():
     """اجرای سرور وب ساده"""
     app = web.Application()
@@ -877,7 +913,14 @@ async def run_telegram_bot():
         ]
     )
     application.add_handler(upload_handler)
-    
+    application.add_handler(
+    MessageHandler(
+        filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO,
+        handle_file
+        )
+    )
+    application.add_handler(CommandHandler("finish_upload", finish_upload))
+
     # مدیریت کانال‌ها
     channel_handler = ConversationHandler(
         entry_points=[CommandHandler("add_channel", add_channel_cmd)],
@@ -906,7 +949,8 @@ async def main():
     """اجرای همزمان سرور وب و ربات تلگرام"""
     await asyncio.gather(
         run_web_server(),
-        run_telegram_bot()
+        run_telegram_bot(),
+        keep_alive()
     )
 
 if __name__ == '__main__':
